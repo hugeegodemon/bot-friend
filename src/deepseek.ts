@@ -31,8 +31,13 @@ function formatHistory(history: ConversationMessage[]) {
 }
 
 export async function generateReply(input: GenerateReplyInput): Promise<string | null> {
+  const triggerDescription = input.reason === "ambient"
+    ? "群聊中的自然插話候選；只有真的接得上話題才回答，不適合就只輸出 <NO_REPLY>"
+    : input.reason === "follow_up"
+      ? "同一位群友正在延續剛才和你的對話，請自然接著回答"
+      : "有人直接叫你、回覆你或傳內容給你，請回答";
   const contextNotes = [
-    `這次觸發方式：${input.reason === "ambient" ? "環境式插話" : "直接互動"}。`,
+    `這次觸發方式：${triggerDescription}。`,
   ];
 
   if (input.videoAnalysis) {
@@ -55,7 +60,7 @@ export async function generateReply(input: GenerateReplyInput): Promise<string |
         ...formatHistory(input.history),
       ],
       thinking: { type: "disabled" },
-      max_tokens: 350,
+      max_tokens: 220,
     }),
     signal: AbortSignal.timeout(45_000),
   });

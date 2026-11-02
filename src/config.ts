@@ -21,10 +21,16 @@ const schema = z.object({
     .enum(["true", "false"])
     .default("false")
     .transform((value) => value === "true"),
+  BOT_WAKE_WORDS: z.string().default("吉伊堡"),
   AUTO_REPLY_ENABLED: booleanText,
-  AUTO_REPLY_PROBABILITY: z.coerce.number().min(0).max(1).default(0.15),
-  AUTO_REPLY_COOLDOWN_SECONDS: z.coerce.number().int().min(0).default(45),
-  MIN_MESSAGES_BEFORE_AUTO_REPLY: z.coerce.number().int().min(1).default(3),
+  AUTO_REPLY_PROBABILITY: z.coerce.number().min(0).max(1).default(1),
+  AUTO_REPLY_COOLDOWN_SECONDS: z.coerce.number().int().min(0).default(15),
+  MIN_MESSAGES_BEFORE_AUTO_REPLY: z.coerce.number().int().min(1).default(6),
+  MAX_MESSAGES_BEFORE_AUTO_REPLY: z.coerce.number().int().min(1).default(12),
+  MESSAGE_BATCH_WINDOW_MS: z.coerce.number().int().min(0).max(30_000).default(2_500),
+  FOLLOW_UP_WINDOW_SECONDS: z.coerce.number().int().min(0).max(3_600).default(120),
+  AMBIENT_REPLY_DELAY_MIN_MS: z.coerce.number().int().min(0).max(60_000).default(4_000),
+  AMBIENT_REPLY_DELAY_MAX_MS: z.coerce.number().int().min(0).max(120_000).default(12_000),
   MEMORY_MESSAGES: z.coerce.number().int().min(2).max(100).default(24),
   MEMORY_TTL_MINUTES: z.coerce.number().int().min(1).default(30),
   MAX_VIDEO_MB: z.coerce.number().positive().max(100).default(25),
@@ -54,6 +60,9 @@ export const config = {
   databasePath: env.DATABASE_PATH,
   registerCommands: env.REGISTER_COMMANDS,
   requireChannelOptIn: env.REQUIRE_CHANNEL_OPT_IN,
+  wakeWords: env.BOT_WAKE_WORDS.split(",")
+    .map((word) => word.trim())
+    .filter(Boolean),
   allowedChannelIds: new Set(
     env.ALLOWED_CHANNEL_IDS.split(",")
       .map((id) => id.trim())
@@ -63,6 +72,17 @@ export const config = {
   autoReplyProbability: env.AUTO_REPLY_PROBABILITY,
   autoReplyCooldownMs: env.AUTO_REPLY_COOLDOWN_SECONDS * 1_000,
   minMessagesBeforeAutoReply: env.MIN_MESSAGES_BEFORE_AUTO_REPLY,
+  maxMessagesBeforeAutoReply: Math.max(
+    env.MAX_MESSAGES_BEFORE_AUTO_REPLY,
+    env.MIN_MESSAGES_BEFORE_AUTO_REPLY,
+  ),
+  messageBatchWindowMs: env.MESSAGE_BATCH_WINDOW_MS,
+  followUpWindowMs: env.FOLLOW_UP_WINDOW_SECONDS * 1_000,
+  ambientReplyDelayMinMs: env.AMBIENT_REPLY_DELAY_MIN_MS,
+  ambientReplyDelayMaxMs: Math.max(
+    env.AMBIENT_REPLY_DELAY_MAX_MS,
+    env.AMBIENT_REPLY_DELAY_MIN_MS,
+  ),
   memoryMessages: env.MEMORY_MESSAGES,
   memoryTtlMs: env.MEMORY_TTL_MINUTES * 60_000,
   maxVideoBytes: env.MAX_VIDEO_MB * 1024 * 1024,

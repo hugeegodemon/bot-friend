@@ -7,7 +7,14 @@ export interface ConversationMessage {
   createdAt: number;
 }
 
-export type TriggerReason = "mention" | "reply" | "video" | "ambient" | "none";
+export type TriggerReason =
+  | "mention"
+  | "wake_word"
+  | "reply"
+  | "follow_up"
+  | "video"
+  | "ambient"
+  | "none";
 
 export interface TriggerDecision {
   shouldReply: boolean;

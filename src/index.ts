@@ -5,15 +5,18 @@ import {
   type Attachment,
   type Message,
 } from "discord.js";
+import { AmbientCadence, randomInteger } from "./cadence.js";
 import { companionCommand, handleCompanionCommand } from "./commands.js";
 import { config } from "./config.js";
 import { generateReply } from "./deepseek.js";
 import { ConversationMemory } from "./memory.js";
 import { loadPersonaPrompt } from "./persona.js";
+import { redactSecrets } from "./secrets.js";
 import { SettingsStore } from "./store.js";
-import { sanitizeDiscordText, splitDiscordMessage } from "./text.js";
+import { containsWakeWord, sanitizeDiscordText, splitDiscordMessage } from "./text.js";
 import { decideTrigger } from "./trigger.js";
 import { VideoAnalyzer, type VideoAttachment } from "./video.js";
+import type { TriggerReason } from "./types.js";
 
 const client = new Client({
   intents: [
@@ -34,6 +37,25 @@ const store = new SettingsStore(config.databasePath, {
 const videoAnalyzer = new VideoAnalyzer();
 const lastReplyByChannel = new Map<string, number>();
 const activeChannels = new Set<string>();
+const pendingMessages = new Map<string, Message>();
+const ambientCadence = new AmbientCadence(
+  config.minMessagesBeforeAutoReply,
+  config.maxMessagesBeforeAutoReply,
+);
+
+interface FollowUpState {
+  participantId: string;
+  until: number;
+}
+
+interface ScheduledReply {
+  message: Message;
+  reason: TriggerReason;
+  timer: NodeJS.Timeout;
+}
+
+const followUpByChannel = new Map<string, FollowUpState>();
+const scheduledReplies = new Map<string, ScheduledReply>();
 
 function channelIsAllowed(guildId: string, channelId: string): boolean {
   if (config.allowedChannelIds.size > 0 && !config.allowedChannelIds.has(channelId)) {
@@ -56,50 +78,33 @@ function getVideoAttachment(message: Message): VideoAttachment | undefined {
   };
 }
 
-async function handleMessage(message: Message): Promise<void> {
-  if (!client.user || !message.inGuild() || message.author.bot || message.webhookId) return;
-  if (!channelIsAllowed(message.guildId, message.channelId)) return;
+function scheduleReply(message: Message, reason: TriggerReason): void {
+  const existing = scheduledReplies.get(message.channelId);
+  if (existing && existing.reason !== "ambient" && reason === "ambient") return;
+  if (existing) clearTimeout(existing.timer);
 
-  const guildSettings = store.getGuildSettings(message.guildId);
+  const delay = reason === "ambient"
+    ? randomInteger(config.ambientReplyDelayMinMs, config.ambientReplyDelayMaxMs)
+    : config.messageBatchWindowMs;
+  const timer = setTimeout(() => {
+    const scheduled = scheduledReplies.get(message.channelId);
+    if (!scheduled || scheduled.timer !== timer) return;
+    scheduledReplies.delete(message.channelId);
+    void executeReply(scheduled.message, scheduled.reason);
+  }, delay);
 
-  const cleanContent = sanitizeDiscordText(message.content, client.user.id);
+  scheduledReplies.set(message.channelId, { message, reason, timer });
+}
+
+async function executeReply(message: Message, reason: TriggerReason): Promise<void> {
+  if (!client.user || !message.inGuild()) return;
   const video = getVideoAttachment(message);
-  const describedContent = [
-    cleanContent,
-    video ? `[附上一段影片：${video.name}]` : "",
-  ].filter(Boolean).join(" ");
-
-  if (!describedContent) return;
-
-  memory.add(message.channelId, {
-    role: "user",
-    author: message.member?.displayName ?? message.author.displayName,
-    content: describedContent,
-    createdAt: message.createdTimestamp,
-  });
-
-  const now = Date.now();
-  const recent = memory.get(message.channelId, now);
-  const lastReplyAt = lastReplyByChannel.get(message.channelId);
-  const decision = decideTrigger({
-    isMentioned: message.mentions.has(client.user),
-    isReplyToBot: message.mentions.repliedUser?.id === client.user.id,
-    hasVideo: video !== undefined,
-    videoAnalysisEnabled: videoAnalyzer.enabled,
-    autoReplyEnabled: guildSettings.autoReplyEnabled,
-    recentMessageCount: recent.filter((item) => item.role === "user").length,
-    minimumRecentMessages: config.minMessagesBeforeAutoReply,
-    ...(lastReplyAt === undefined ? {} : { lastReplyAt }),
-    cooldownMs: guildSettings.autoReplyCooldownMs,
-    probability: guildSettings.autoReplyProbability,
-    now,
-    random: Math.random(),
-  });
-
-  if (!decision.shouldReply || activeChannels.has(message.channelId)) return;
+  if (activeChannels.has(message.channelId)) {
+    if (reason !== "ambient") pendingMessages.set(message.channelId, message);
+    return;
+  }
 
   activeChannels.add(message.channelId);
-  lastReplyByChannel.set(message.channelId, now);
 
   try {
     await message.channel.sendTyping();
@@ -114,7 +119,7 @@ async function handleMessage(message: Message): Promise<void> {
     const reply = await generateReply({
       personaPrompt,
       history: memory.get(message.channelId),
-      reason: decision.reason,
+      reason,
       ...(videoAnalysis ? { videoAnalysis } : {}),
     });
 
@@ -137,10 +142,16 @@ async function handleMessage(message: Message): Promise<void> {
       content: reply,
       createdAt: Date.now(),
     });
+    const repliedAt = Date.now();
+    lastReplyByChannel.set(message.channelId, repliedAt);
+    followUpByChannel.set(message.channelId, {
+      participantId: message.author.id,
+      until: repliedAt + config.followUpWindowMs,
+    });
   } catch (error) {
     store.recordUsage(message.guildId, "failure");
     console.error(`[message:${message.id}]`, error);
-    if (decision.reason !== "ambient") {
+    if (reason !== "ambient") {
       await message.reply({
         content: "我剛剛腦袋卡住了，等一下再叫我一次 😵‍💫",
         allowedMentions: { repliedUser: false },
@@ -148,7 +159,80 @@ async function handleMessage(message: Message): Promise<void> {
     }
   } finally {
     activeChannels.delete(message.channelId);
+    const pending = pendingMessages.get(message.channelId);
+    if (pending) {
+      pendingMessages.delete(message.channelId);
+      void handleMessage(pending, true);
+    }
   }
+}
+
+async function handleMessage(message: Message, alreadyRecorded = false): Promise<void> {
+  if (!client.user || !message.inGuild() || message.author.bot || message.webhookId) return;
+  if (!channelIsAllowed(message.guildId, message.channelId)) return;
+
+  const guildSettings = store.getGuildSettings(message.guildId);
+  const cleanContent = sanitizeDiscordText(message.content, client.user.id);
+  const redacted = redactSecrets(cleanContent);
+  const video = getVideoAttachment(message);
+  const describedContent = [
+    redacted.text,
+    video ? `[附上一段影片：${video.name}]` : "",
+  ].filter(Boolean).join(" ");
+
+  if (!describedContent) return;
+
+  if (!alreadyRecorded) {
+    memory.add(message.channelId, {
+      role: "user",
+      author: message.member?.displayName ?? message.author.displayName,
+      content: describedContent,
+      createdAt: message.createdTimestamp,
+    });
+  }
+
+  if (redacted.detected.length > 0) {
+    await message.reply({
+      content: `這則訊息看起來包含 ${redacted.detected.join("、")}。我沒有把內容送給 AI；請立刻撤銷並重新建立金鑰，單純刪除 Discord 訊息還不夠。`,
+      allowedMentions: { repliedUser: false },
+    }).catch(() => undefined);
+    return;
+  }
+
+  const now = Date.now();
+  const isMentioned = message.mentions.has(client.user);
+  const hasWakeWord = containsWakeWord(cleanContent, config.wakeWords);
+  const isReplyToBot = message.mentions.repliedUser?.id === client.user.id;
+  const followUp = followUpByChannel.get(message.channelId);
+  const isFollowUp = followUp !== undefined
+    && followUp.participantId === message.author.id
+    && now <= followUp.until;
+  const hasDirectSignal = isMentioned
+    || hasWakeWord
+    || isReplyToBot
+    || isFollowUp
+    || (video !== undefined && videoAnalyzer.enabled);
+  const ambientCheckDue = hasDirectSignal
+    ? false
+    : ambientCadence.recordHumanMessage(message.channelId);
+  const lastReplyAt = lastReplyByChannel.get(message.channelId);
+  const decision = decideTrigger({
+    isMentioned,
+    hasWakeWord,
+    isReplyToBot,
+    isFollowUp,
+    hasVideo: video !== undefined,
+    videoAnalysisEnabled: videoAnalyzer.enabled,
+    autoReplyEnabled: guildSettings.autoReplyEnabled,
+    ambientCheckDue,
+    ...(lastReplyAt === undefined ? {} : { lastReplyAt }),
+    cooldownMs: guildSettings.autoReplyCooldownMs,
+    probability: guildSettings.autoReplyProbability,
+    now,
+    random: Math.random(),
+  });
+
+  if (decision.shouldReply) scheduleReply(message, decision.reason);
 }
 
 client.once(Events.ClientReady, async (readyClient) => {
@@ -203,6 +287,8 @@ client.on(Events.InteractionCreate, (interaction) => {
 
 const shutdown = async (signal: string) => {
   console.log(`Received ${signal}; shutting down.`);
+  for (const scheduled of scheduledReplies.values()) clearTimeout(scheduled.timer);
+  scheduledReplies.clear();
   client.destroy();
   store.close();
   process.exit(0);

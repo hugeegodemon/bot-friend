@@ -5,6 +5,11 @@ export function sanitizeDiscordText(text: string, botUserId: string): string {
     .trim();
 }
 
+export function containsWakeWord(text: string, wakeWords: readonly string[]): boolean {
+  const normalized = text.toLocaleLowerCase("zh-TW");
+  return wakeWords.some((word) => normalized.includes(word.toLocaleLowerCase("zh-TW")));
+}
+
 export function splitDiscordMessage(text: string, maxLength: number): string[] {
   const normalized = text.trim();
   if (!normalized) return [];

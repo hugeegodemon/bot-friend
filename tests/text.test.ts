@@ -1,10 +1,19 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { sanitizeDiscordText, splitDiscordMessage } from "../src/text.js";
+import {
+  containsWakeWord,
+  sanitizeDiscordText,
+  splitDiscordMessage,
+} from "../src/text.js";
 
 describe("Discord text helpers", () => {
   it("removes bot mentions", () => {
     assert.equal(sanitizeDiscordText("嗨 <@!123>  在嗎", "123"), "嗨 在嗎");
+  });
+
+  it("recognizes the bot name in ordinary text", () => {
+    assert.equal(containsWakeWord("欸吉伊堡你看這個", ["吉伊堡"]), true);
+    assert.equal(containsWakeWord("大家晚上好", ["吉伊堡"]), false);
   });
 
   it("splits long messages without losing content", () => {
