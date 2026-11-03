@@ -66,4 +66,38 @@ describe("SettingsStore", () => {
       store.close();
     }
   });
+
+  it("stores personal memories per guild and user without duplicates", () => {
+    const store = createStore();
+    try {
+      assert.equal(store.addUserMemories("guild-a", "user-a", ["喜歡玩輔助"]), 1);
+      assert.equal(store.addUserMemories("guild-a", "user-a", ["喜歡玩輔助"]), 0);
+      store.addUserMemories("guild-a", "user-b", ["喜歡玩中路"]);
+      store.addUserMemories("guild-b", "user-a", ["喜歡玩上路"]);
+
+      assert.deepEqual(
+        store.getUserMemories("guild-a", "user-a").map((item) => item.content),
+        ["喜歡玩輔助"],
+      );
+      assert.equal(store.deleteUserMemories("guild-a", "user-a"), 1);
+      assert.deepEqual(store.getUserMemories("guild-a", "user-a"), []);
+      assert.equal(store.getUserMemories("guild-a", "user-b").length, 1);
+      assert.equal(store.getUserMemories("guild-b", "user-a").length, 1);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("caps each user's memory collection and deletes it with guild data", () => {
+    const store = createStore();
+    try {
+      const memories = Array.from({ length: 25 }, (_, index) => `記憶 ${index}`);
+      store.addUserMemories("guild", "user", memories);
+      assert.equal(store.getUserMemories("guild", "user", 20).length, 20);
+      store.deleteGuildData("guild");
+      assert.deepEqual(store.getUserMemories("guild", "user"), []);
+    } finally {
+      store.close();
+    }
+  });
 });

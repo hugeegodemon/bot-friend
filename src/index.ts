@@ -12,6 +12,7 @@ import { generateReply } from "./deepseek.js";
 import { ConversationMemory } from "./memory.js";
 import { loadPersonaPrompt } from "./persona.js";
 import { redactSecrets } from "./secrets.js";
+import { replyBubbleDelay } from "./reply.js";
 import { SettingsStore } from "./store.js";
 import { containsWakeWord, sanitizeDiscordText, splitDiscordMessage } from "./text.js";
 import { decideTrigger } from "./trigger.js";
@@ -56,6 +57,10 @@ interface ScheduledReply {
 
 const followUpByChannel = new Map<string, FollowUpState>();
 const scheduledReplies = new Map<string, ScheduledReply>();
+
+function wait(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
 
 function channelIsAllowed(guildId: string, channelId: string): boolean {
   if (config.allowedChannelIds.size > 0 && !config.allowedChannelIds.has(channelId)) {
@@ -116,32 +121,57 @@ async function executeReply(message: Message, reason: TriggerReason): Promise<vo
     }
 
     store.recordUsage(message.guildId, "text");
-    const reply = await generateReply({
+    const participantName = message.member?.displayName ?? message.author.displayName;
+    const participantMemories = store
+      .getUserMemories(message.guildId, message.author.id)
+      .map((item) => item.content);
+    const generatedReply = await generateReply({
       personaPrompt,
       history: memory.get(message.channelId),
       reason,
+      participantName,
+      participantMemories,
       ...(videoAnalysis ? { videoAnalysis } : {}),
     });
 
-    if (!reply) return;
+    if (!generatedReply) return;
+    const replyMessages = generatedReply.messages;
 
-    const chunks = splitDiscordMessage(reply, config.maxReplyChars);
-    for (let index = 0; index < chunks.length; index += 1) {
-      const chunk = chunks[index];
-      if (!chunk) continue;
-      if (index === 0) {
-        await message.reply({ content: chunk, allowedMentions: { repliedUser: false } });
-      } else {
-        await message.channel.send(chunk);
+    let sentMessage = false;
+    for (const [bubbleIndex, bubble] of replyMessages.entries()) {
+      if (bubbleIndex > 0) {
+        await wait(replyBubbleDelay());
+        await message.channel.sendTyping();
+      }
+
+      for (const chunk of splitDiscordMessage(bubble, config.maxReplyChars)) {
+        if (!chunk) continue;
+        if (!sentMessage) {
+          await message.reply({ content: chunk, allowedMentions: { repliedUser: false } });
+        } else {
+          await message.channel.send(chunk);
+        }
+        sentMessage = true;
       }
     }
 
     memory.add(message.channelId, {
       role: "assistant",
       author: client.user.displayName,
-      content: reply,
+      content: replyMessages.join("\n"),
       createdAt: Date.now(),
     });
+    if (reason !== "ambient" && generatedReply.memories.length > 0) {
+      const safeMemories = generatedReply.memories.filter(
+        (item) => redactSecrets(item).detected.length === 0,
+      );
+      const added = store.addUserMemories(
+        message.guildId,
+        message.author.id,
+        safeMemories,
+      );
+      if (added > 0) await message.react("🧠").catch(() => undefined);
+    }
     const repliedAt = Date.now();
     lastReplyByChannel.set(message.channelId, repliedAt);
     followUpByChannel.set(message.channelId, {

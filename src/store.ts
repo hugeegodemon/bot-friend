@@ -14,6 +14,15 @@ export interface DailyUsage {
   failures: number;
 }
 
+export interface UserMemory {
+  id: number;
+  content: string;
+  createdAt: number;
+}
+
+const MAX_USER_MEMORIES = 20;
+const MAX_USER_MEMORY_LENGTH = 160;
+
 type UsageKind = "text" | "video" | "failure";
 
 interface StoreDefaults extends GuildSettings {
@@ -66,6 +75,18 @@ export class SettingsStore {
         failures INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (usage_date, guild_id)
       ) STRICT;
+
+      CREATE TABLE IF NOT EXISTS user_memories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        content TEXT NOT NULL CHECK (length(content) BETWEEN 1 AND ${MAX_USER_MEMORY_LENGTH}),
+        created_at INTEGER NOT NULL,
+        UNIQUE (guild_id, user_id, content)
+      ) STRICT;
+
+      CREATE INDEX IF NOT EXISTS user_memories_owner_idx
+      ON user_memories (guild_id, user_id, created_at DESC);
     `);
   }
 
@@ -183,12 +204,87 @@ export class SettingsStore {
     };
   }
 
+  getUserMemories(
+    guildId: string,
+    userId: string,
+    limit = MAX_USER_MEMORIES,
+  ): UserMemory[] {
+    const safeLimit = Math.max(0, Math.min(Math.trunc(limit), MAX_USER_MEMORIES));
+    if (safeLimit === 0) return [];
+
+    return this.#database
+      .prepare(`
+        SELECT id, content, created_at
+        FROM user_memories
+        WHERE guild_id = ? AND user_id = ?
+        ORDER BY created_at DESC, id DESC
+        LIMIT ?
+      `)
+      .all(guildId, userId, safeLimit)
+      .map((row) => ({
+        id: asNumber(row.id, 0),
+        content: typeof row.content === "string" ? row.content : "",
+        createdAt: asNumber(row.created_at, 0),
+      }))
+      .filter((memory) => memory.id > 0 && memory.content.length > 0);
+  }
+
+  addUserMemories(guildId: string, userId: string, memories: string[]): number {
+    const normalized = [...new Set(
+      memories
+        .map((memory) => memory.trim().replace(/\s+/g, " "))
+        .filter(
+          (memory) => memory.length > 0 && memory.length <= MAX_USER_MEMORY_LENGTH,
+        ),
+    )];
+    if (normalized.length === 0) return 0;
+
+    let added = 0;
+    const now = Date.now();
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const insert = this.#database.prepare(`
+        INSERT OR IGNORE INTO user_memories (guild_id, user_id, content, created_at)
+        VALUES (?, ?, ?, ?)
+      `);
+      for (const content of normalized) {
+        added += Number(insert.run(guildId, userId, content, now).changes);
+      }
+      this.#database
+        .prepare(`
+          DELETE FROM user_memories
+          WHERE guild_id = ? AND user_id = ?
+            AND id NOT IN (
+              SELECT id FROM user_memories
+              WHERE guild_id = ? AND user_id = ?
+              ORDER BY created_at DESC, id DESC
+              LIMIT ?
+            )
+        `)
+        .run(guildId, userId, guildId, userId, MAX_USER_MEMORIES);
+      this.#database.exec("COMMIT");
+    } catch (error) {
+      this.#database.exec("ROLLBACK");
+      throw error;
+    }
+    return added;
+  }
+
+  deleteUserMemories(guildId: string, userId: string): number {
+    return Number(
+      this.#database
+        .prepare("DELETE FROM user_memories WHERE guild_id = ? AND user_id = ?")
+        .run(guildId, userId).changes,
+    );
+  }
+
   deleteGuildData(guildId: string): void {
     this.#database.exec("BEGIN IMMEDIATE");
     try {
       this.#database.prepare("DELETE FROM channel_settings WHERE guild_id = ?").run(guildId);
       this.#database.prepare("DELETE FROM guild_settings WHERE guild_id = ?").run(guildId);
       this.#database.prepare("DELETE FROM daily_usage WHERE guild_id = ?").run(guildId);
+      this.#database.prepare("DELETE FROM user_memories WHERE guild_id = ?").run(guildId);
       this.#database.exec("COMMIT");
     } catch (error) {
       this.#database.exec("ROLLBACK");

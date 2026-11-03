@@ -5,6 +5,7 @@ import {
   SlashCommandBuilder,
 } from "discord.js";
 import type { ConversationMemory } from "./memory.js";
+import { redactSecrets } from "./secrets.js";
 import type { SettingsStore } from "./store.js";
 
 export const companionCommand = new SlashCommandBuilder()
@@ -41,6 +42,30 @@ export const companionCommand = new SlashCommandBuilder()
           .setDescription("自然插話冷卻秒數")
           .setMinValue(0)
           .setMaxValue(3600),
+      ),
+  )
+  .addSubcommand((command) =>
+    command.setName("memories").setDescription("查看吉伊堡記得的你的個人資訊"),
+  )
+  .addSubcommand((command) =>
+    command
+      .setName("remember")
+      .setDescription("明確要求吉伊堡記住一件關於你的事")
+      .addStringOption((option) =>
+        option
+          .setName("content")
+          .setDescription("要記住的內容，例如：我喜歡玩輔助")
+          .setMinLength(1)
+          .setMaxLength(160)
+          .setRequired(true),
+      ),
+  )
+  .addSubcommand((command) =>
+    command
+      .setName("forget-me")
+      .setDescription("清除吉伊堡在這個伺服器記得的你的個人資訊")
+      .addBooleanOption((option) =>
+        option.setName("confirm").setDescription("確認清除").setRequired(true),
       ),
   )
   .addSubcommand((command) =>
@@ -100,6 +125,57 @@ export async function handleCompanionCommand(
         `影片理解：${dependencies.videoEnabled ? "已設定" : "未設定"}`,
         `今日用量：文字 ${usage.textRequests}、影片 ${usage.videoRequests}、失敗 ${usage.failures}`,
       ].join("\n"),
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (subcommand === "memories") {
+    const memories = store.getUserMemories(interaction.guildId, interaction.user.id, 10);
+    await interaction.reply({
+      content: memories.length === 0
+        ? "吉伊堡目前沒有保存關於你的個人記憶。"
+        : [
+            `吉伊堡最近記得的 ${memories.length} 件事：`,
+            ...memories.map((item) => `- ${item.content}`),
+            "你可以用 `/companion forget-me` 全部清除。",
+          ].join("\n"),
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (subcommand === "remember") {
+    const content = interaction.options.getString("content", true).trim();
+    const redacted = redactSecrets(content);
+    if (redacted.detected.length > 0) {
+      await interaction.reply({
+        content: "這段內容看起來包含密鑰或 Token，沒有保存。請不要把憑證交給吉伊堡記住。",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+    const added = store.addUserMemories(interaction.guildId, interaction.user.id, [content]);
+    await interaction.reply({
+      content: added > 0 ? `記住了：${content}` : "這件事已經記得了。",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (subcommand === "forget-me") {
+    if (!interaction.options.getBoolean("confirm", true)) {
+      await interaction.reply({
+        content: "未確認清除，個人記憶沒有變更。",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+    const removed = store.deleteUserMemories(interaction.guildId, interaction.user.id);
+    await interaction.reply({
+      content: removed > 0
+        ? `已清除吉伊堡在這個伺服器保存的 ${removed} 條你的個人記憶。`
+        : "吉伊堡目前沒有保存關於你的個人記憶。",
       flags: MessageFlags.Ephemeral,
     });
     return;
